@@ -1,14 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { globalStore } from './lib/store.ts';
 import { handleInfoRefs, handleUploadPack, handleReceivePack } from './lib/gitproto.ts';
-
-const JSON_TYPE = 'application/json; charset=utf-8';
-
-function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
-  const text = `${JSON.stringify(body)}\n`;
-  res.writeHead(status, { 'content-type': JSON_TYPE, 'content-length': Buffer.byteLength(text), ...headers });
-  res.end(text);
-}
+import { handleRestApi, sendJson } from './lib/rest.ts';
 
 function pathOf(req: IncomingMessage): string {
   try {
@@ -66,9 +59,9 @@ export function createApp(): Server {
       }
     }
 
-    if (method === 'GET' && (path === '/api/v3' || path === '/api/v3/')) {
-      sendJson(res, 200, { current_user_url: '/api/v3/user', rate_limit_url: '/api/v3/rate_limit' }, { 'x-oauth-scopes': 'repo, read:org' });
-      return;
+    if (path.startsWith('/api/v3')) {
+      const handled = await handleRestApi(req, res, globalStore);
+      if (handled) return;
     }
 
     sendJson(res, 404, { message: 'Not Found' });

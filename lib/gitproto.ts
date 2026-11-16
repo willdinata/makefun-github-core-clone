@@ -1,11 +1,6 @@
 import { createHash } from 'node:crypto';
-import { MemoryStore, globalStore } from './store.ts';
-import { hashObject, isObjectId, isAncestor, readPack, type GitObjectType } from './gitobj.ts';
-
-// Pack buffer preallocation helper for performance optimization
-export function preallocatePackBuffer(estimatedSize: number): Buffer {
-  return Buffer.allocUnsafe(Math.max(1024, estimatedSize));
-}
+import { MemoryStore } from './store.ts';
+import { readPack, isObjectId, isAncestor, type GitObjectType } from './gitobj.ts';
 
 export const ZERO_OID = '0'.repeat(40);
 
@@ -18,14 +13,6 @@ export function encodePktLine(input: string | Uint8Array): Buffer {
 
 export function pktLineFlush(): Buffer {
   return Buffer.from('0000', 'ascii');
-}
-
-export function pktLineDelim(): Buffer {
-  return Buffer.from('0001', 'ascii');
-}
-
-export function pktLineResponseEnd(): Buffer {
-  return Buffer.from('0002', 'ascii');
 }
 
 export function encodeSideband(channel: number, data: Uint8Array): Buffer {
@@ -68,9 +55,7 @@ export function decodePktLines(buffer: Buffer): Array<{ type: 'data' | 'flush' |
 }
 
 export function handleInfoRefs(reqPath: string, queryService: string, store: MemoryStore): { status: number; headers: Record<string, string>; body: Buffer } {
-  // Path format: /{owner}/{repo}.git/info/refs
   const parts = reqPath.split('/');
-  // ['', owner, repo.git, 'info', 'refs']
   if (parts.length < 5) {
     return { status: 404, headers: { 'content-type': 'text/plain' }, body: Buffer.from('Not Found') };
   }
@@ -87,9 +72,9 @@ export function handleInfoRefs(reqPath: string, queryService: string, store: Mem
   }
 
   const refsMap = store.refs.get(repoKey) ?? new Map<string, string>();
+  const headOid = refsMap.get('refs/heads/main') ?? refsMap.get('HEAD');
 
   if (queryService === 'git-upload-pack') {
-    // Protocol v2 advertisement
     const lines: Buffer[] = [];
     lines.push(encodePktLine('version 2\n'));
     lines.push(encodePktLine('agent=makefun-forge/1.0\n'));
@@ -103,19 +88,24 @@ export function handleInfoRefs(reqPath: string, queryService: string, store: Mem
       body: Buffer.concat(lines),
     };
   } else if (queryService === 'git-receive-pack') {
-    // Protocol v0 advertisement
     const lines: Buffer[] = [];
     lines.push(encodePktLine('# service=git-receive-pack\n'));
     lines.push(pktLineFlush());
 
-    const caps = 'report-status report-status-v2 side-band-64k delete-refs object-format=sha1';
+    const caps = 'report-status report-status-v2 side-band-64k delete-refs object-format=sha1' + (headOid ? ' symref=HEAD:refs/heads/main' : '');
     let first = true;
 
-    if (refsMap.size === 0) {
+    if (headOid) {
+      lines.push(encodePktLine(`${headOid} HEAD\0${caps}\n`));
+      first = false;
+    }
+
+    if (refsMap.size === 0 && !headOid) {
       const line = `${ZERO_OID} capabilities^{}\0${caps}\n`;
       lines.push(encodePktLine(line));
     } else {
       for (const [refName, oid] of refsMap.entries()) {
+        if (refName === 'HEAD') continue;
         const line = first ? `${oid} ${refName}\0${caps}\n` : `${oid} ${refName}\n`;
         lines.push(encodePktLine(line));
         first = false;
@@ -145,10 +135,16 @@ export function handleUploadPack(reqPath: string, bodyBuf: Buffer, store: Memory
   const command = packets[0]?.data?.toString('utf8').trim() ?? '';
 
   if (command.startsWith('command=ls-refs')) {
-    // Handle ls-refs v2
     const lines: Buffer[] = [];
+    // Always report HEAD symref if main exists
+    const mainOid = refsMap.get('refs/heads/main');
+    if (mainOid) {
+      lines.push(encodePktLine(`symref-target HEAD refs/heads/main\n`));
+    }
     for (const [refName, oid] of refsMap.entries()) {
-      lines.push(encodePktLine(`${oid} ${refName}\n`));
+      if (refName !== 'HEAD') {
+        lines.push(encodePktLine(`${oid} ${refName}\n`));
+      }
     }
     lines.push(pktLineFlush());
     return {
@@ -157,7 +153,6 @@ export function handleUploadPack(reqPath: string, bodyBuf: Buffer, store: Memory
       body: Buffer.concat(lines),
     };
   } else if (command.startsWith('command=fetch')) {
-    // Handle fetch v2: parse want, done, and construct a packfile response with side-band-64k
     const wants: string[] = [];
     for (const p of packets) {
       if (p.type === 'data' && p.data) {
@@ -168,19 +163,7 @@ export function handleUploadPack(reqPath: string, bodyBuf: Buffer, store: Memory
       }
     }
 
-    // Gather objects reachable from wants
-    const objectOids = new Set<string>();
-    const queue = [...wants];
-    const lookup = (oid: string) => {
-      const data = store.objects.get(oid);
-      if (!data) return undefined;
-      // determine type from header or store if stored with type. For simplicity, check object content or store map
-      return { type: 'commit' as GitObjectType, data };
-    };
-
-    // Build pack file containing requested objects
     const packParts: Buffer[] = [];
-    // PACK header
     const hdr = Buffer.alloc(12);
     hdr.write('PACK', 0, 4, 'ascii');
     hdr.writeUInt32BE(2, 4);
@@ -190,11 +173,8 @@ export function handleUploadPack(reqPath: string, bodyBuf: Buffer, store: Memory
     for (const wantOid of wants) {
       const objData = store.objects.get(wantOid);
       if (objData) {
-        // Uncompressed object in pack: type 3 (blob) or 1 (commit) or 2 (tree)
-        // Simple type code 3 for blob, 1 for commit, etc. Let's encode uncompressed object
-        const typeCode = 3; // blob/commit placeholder
+        const typeCode = 3; // blob/commit
         const size = objData.length;
-        // encode size varint
         const headerBytes: number[] = [];
         let sz = size;
         headerBytes.push(((typeCode & 7) << 4) | (sz & 15));
@@ -204,18 +184,15 @@ export function handleUploadPack(reqPath: string, bodyBuf: Buffer, store: Memory
           sz >>= 7;
         }
         packParts.push(Buffer.from(headerBytes));
-        // zlib deflate objData
         const compressed = require('node:zlib').deflateSync(objData);
         packParts.push(compressed);
       }
     }
 
     const packBuf = Buffer.concat(packParts);
-    // compute sha1 checksum of pack before trailer
     const sha = createHash('sha1').update(packBuf).digest();
     const finalPack = Buffer.concat([packBuf, sha]);
 
-    // Send via side-band-64k (channel 1 = pack data)
     const outChunks: Buffer[] = [];
     outChunks.push(encodeSideband(1, finalPack));
     outChunks.push(pktLineFlush());
@@ -242,21 +219,14 @@ export function handleReceivePack(reqPath: string, bodyBuf: Buffer, store: Memor
   }
   const refsMap = store.refs.get(repoKey)!;
 
-  // Parse pkt-lines up to flush, then packfile
   const packets = decodePktLines(bodyBuf);
   const commands: Array<{ oldOid: string; newOid: string; refName: string }> = [];
-  let packOffset = 0;
 
-  for (let i = 0; i < packets.length; i++) {
-    const pkt = packets[i]!;
-    if (pkt.type === 'flush') {
-      // packfile starts after flush
-      // calculate exact buffer offset where pack starts
-      break;
-    }
+  for (const pkt of packets) {
+    if (pkt.type === 'flush') break;
     if (pkt.type === 'data' && pkt.data) {
       const line = pkt.data.toString('utf8').trim();
-      const [oldNew, refNameWithCaps] = line.split('\0');
+      const [oldNew] = line.split('\0');
       if (oldNew) {
         const [oldOid, newOid, refName] = oldNew.split(' ');
         if (oldOid && newOid && refName) {
@@ -266,19 +236,18 @@ export function handleReceivePack(reqPath: string, bodyBuf: Buffer, store: Memor
     }
   }
 
-  // Find where packfile starts in bodyBuf
-  // Search for 'PACK' signature
+  // Parse packfile if present and store objects
   const packIndex = bodyBuf.indexOf('PACK');
   if (packIndex >= 0) {
     const packBytes = bodyBuf.subarray(packIndex);
-    // Parse pack and store objects
-    try {
-      // Simple raw object extraction or readPack
-      store.objects.set('dummy', packBytes); // store raw pack or objects
-    } catch {}
+    const parsedObjects = readPack(packBytes, {
+      resolveBase: (oid) => store.objects.get(oid),
+    });
+    for (const obj of parsedObjects) {
+      store.objects.set(obj.oid, obj.data);
+    }
   }
 
-  // Process ref updates with fast-forward validation
   const reportLines: string[] = [];
   reportLines.push('unpack ok\n');
 
@@ -289,20 +258,30 @@ export function handleReceivePack(reqPath: string, bodyBuf: Buffer, store: Memor
       continue;
     }
 
+    // Fast-forward check: if oldOid is not zero and newOid is not zero, check ancestry if object exists
+    if (cmd.oldOid !== ZERO_OID && cmd.newOid !== ZERO_OID) {
+      const isAnc = isAncestor(cmd.oldOid, cmd.newOid, (oid) => {
+        const data = store.objects.get(oid);
+        return data ? { type: 'commit', data } : undefined;
+      });
+      if (!isAnc) {
+        reportLines.push(`ng ${cmd.refName} non-fast-forward\n`);
+        continue;
+      }
+    }
+
     if (cmd.newOid === ZERO_OID) {
       refsMap.delete(cmd.refName);
       reportLines.push(`ok ${cmd.refName}\n`);
     } else {
-      // Fast forward check: if oldOid is not zero and not ancestor of newOid, refuse
-      if (cmd.oldOid !== ZERO_OID && cmd.oldOid !== currentOid) {
-        reportLines.push(`ng ${cmd.refName} non-fast-forward\n`);
-        continue;
-      }
       refsMap.set(cmd.refName, cmd.newOid);
+      if (cmd.refName === 'refs/heads/main') {
+        refsMap.set('HEAD', cmd.newOid);
+      }
       reportLines.push(`ok ${cmd.refName}\n`);
     }
   }
-  reportLines.push(''); // flush marker
+  reportLines.push('');
 
   const reportText = reportLines.join('');
   const sidebandBody = encodeSideband(1, Buffer.from(reportText, 'utf8'));

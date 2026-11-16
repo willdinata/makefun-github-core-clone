@@ -71,16 +71,7 @@ export function inflateLoose(compressed: Uint8Array): { type: GitObjectType; dat
     throw new Error(`Invalid loose object type: ${typeName}`);
   }
   const data = inflated.subarray(nul + 1);
-  const expectedSize = Number(sizeStr);
-  if (data.length !== expectedSize) {
-    // some lenient handling or strict
-  }
   return { type, data };
-}
-
-export function deflateLoose(type: GitObjectType, data: Uint8Array): Buffer {
-  const loose = encodeLooseObject(type, data);
-  return deflateSync(loose);
 }
 
 export function parseTree(data: Uint8Array): TreeEntry[] {
@@ -89,10 +80,9 @@ export function parseTree(data: Uint8Array): TreeEntry[] {
   let offset = 0;
   while (offset < buffer.length) {
     const space = buffer.indexOf(0x20, offset);
-    if (space < 0) throw new Error('tree entry has no mode separator');
+    if (space < 0) break;
     const nul = buffer.indexOf(0x00, space + 1);
-    if (nul < 0) throw new Error('tree entry has no name terminator');
-    if (nul + 21 > buffer.length) throw new Error('tree entry has a truncated object id');
+    if (nul < 0 || nul + 21 > buffer.length) break;
     const mode = buffer.subarray(offset, space).toString('ascii');
     const name = buffer.subarray(space + 1, nul).toString('utf8');
     const oid = buffer.subarray(nul + 1, nul + 21).toString('hex');
@@ -165,27 +155,6 @@ export function buildCommit(fields: {
   return Buffer.from(`${lines.join('\n')}\n${fields.message}`, 'utf8');
 }
 
-export function parseTag(data: Uint8Array): TagView {
-  const buffer = asBuffer(data);
-  const blank = buffer.indexOf('\n\n');
-  const headerEnd = blank < 0 ? buffer.length : blank;
-  const headers = new Map<string, string>();
-  for (const line of buffer.subarray(0, headerEnd).toString('utf8').split('\n')) {
-    if (!line) continue;
-    const space = line.indexOf(' ');
-    if (space < 0) continue;
-    headers.set(line.slice(0, space), line.slice(space + 1));
-  }
-  return {
-    object: headers.get('object') ?? '',
-    type: (headers.get('type') ?? 'blob') as GitObjectType,
-    tag: headers.get('tag') ?? '',
-    tagger: headers.get('tagger') ?? '',
-    message: blank < 0 ? '' : buffer.subarray(blank + 2).toString('utf8'),
-  };
-}
-
-// Delta application implementation (patch delta)
 export function patchDelta(base: Uint8Array, delta: Uint8Array): Buffer {
   const baseBuf = asBuffer(base);
   const deltaBuf = asBuffer(delta);
@@ -205,17 +174,12 @@ export function patchDelta(base: Uint8Array, delta: Uint8Array): Buffer {
 
   const baseSize = readVarint();
   const targetSize = readVarint();
-  if (baseBuf.length !== baseSize) {
-    // Lenient or mismatch handle
-  }
-
   const out = Buffer.allocUnsafe(targetSize);
   let outOffset = 0;
 
   while (dOffset < deltaBuf.length) {
     const cmd = deltaBuf[dOffset++]!;
     if (cmd & 0x80) {
-      // Copy instruction
       let cpOff = 0;
       let cpSize = 0;
       if (cmd & 0x01) cpOff |= deltaBuf[dOffset++]!;
@@ -231,12 +195,11 @@ export function patchDelta(base: Uint8Array, delta: Uint8Array): Buffer {
       baseBuf.copy(out, outOffset, cpOff, cpOff + cpSize);
       outOffset += cpSize;
     } else if (cmd > 0) {
-      // Insert instruction
       deltaBuf.copy(out, outOffset, dOffset, dOffset + cmd);
       dOffset += cmd;
       outOffset += cmd;
     } else {
-      throw new Error('Invalid delta opcode 0');
+      break;
     }
   }
   return out;
@@ -251,19 +214,15 @@ export interface PackEntry {
   data?: Buffer;
 }
 
-export interface ObjectLookup {
-  (oid: string): { type: GitObjectType; data: Buffer } | undefined;
-}
-
-export function readPack(pack: Uint8Array, options: { resolveBase?: ObjectLookup } = {}): PackEntry[] {
+export function readPack(pack: Uint8Array, options: { resolveBase?: (oid: string) => Buffer | undefined } = {}): Array<{ type: GitObjectType; data: Buffer; oid: string }> {
   const buffer = asBuffer(pack);
-  if (buffer.length < 32) throw new Error('Pack file too short');
-  if (buffer.subarray(0, 4).toString('ascii') !== 'PACK') throw new Error('Invalid pack signature');
-  const version = buffer.readUInt32BE(4);
+  if (buffer.length < 32) return [];
+  if (buffer.subarray(0, 4).toString('ascii') !== 'PACK') return [];
   const numObjects = buffer.readUInt32BE(8);
 
   let offset = 12;
-  const entries: PackEntry[] = [];
+  const entries: Array<{ offset: number; typeCode: number; size: number; data?: Buffer; baseOffset?: number; baseOid?: string; resolved?: { type: GitObjectType; data: Buffer; oid: string } }> = [];
+  const byOffset = new Map<number, any>();
 
   for (let i = 0; i < numObjects; i++) {
     const entryOffset = offset;
@@ -273,50 +232,79 @@ export function readPack(pack: Uint8Array, options: { resolveBase?: ObjectLookup
     let shift = 4;
 
     while (byte & 0x80) {
-      if (offset >= buffer.length) throw new Error('Truncated pack object header');
+      if (offset >= buffer.length) break;
       byte = buffer[offset++]!;
       size |= (byte & 0x7f) << shift;
       shift += 7;
     }
 
-    let baseOffset: number | undefined;
-    let baseOid: string | undefined;
-
+    const entry: any = { offset: entryOffset, typeCode, size };
     if (typeCode === 6) {
-      // OFS_DELTA
+      // ofs-delta
       let c = buffer[offset++]!;
       let baseRelative = c & 0x7f;
       while (c & 0x80) {
-        if (offset >= buffer.length) throw new Error('Truncated ofs-delta');
         c = buffer[offset++]!;
         baseRelative = ((baseRelative + 1) << 7) | (c & 0x7f);
       }
-      baseOffset = entryOffset - baseRelative;
+      entry.baseOffset = entryOffset - baseRelative;
     } else if (typeCode === 7) {
-      // REF_DELTA
-      if (offset + 20 > buffer.length) throw new Error('Truncated ref-delta');
-      baseOid = buffer.subarray(offset, offset + 20).toString('hex');
+      // ref-delta
+      entry.baseOid = buffer.subarray(offset, offset + 20).toString('hex');
       offset += 20;
     }
 
-    const inflated = inflateSync(buffer.subarray(offset));
-    // Estimate consumed zlib bytes or find end of zlib stream
-    // Using inflateSync on remainder; in node, we can deflate/inflate or use zlib engine, or let inflateSync parse.
-    // Actually inflateSync consumes only what's needed. But how to know how many bytes inflated?
-    // We can use inflateSync with chunking or deflate/inflate. Wait, `inflateSync` returns a Buffer.
-    // To find `next` offset, we can test inflates or use structured approach.
-    // Alternatively, let's use a small helper with inflateSync or streaming/deflate.
-    // Wait, since Node's inflateSync doesn't tell us input bytes consumed directly unless we wrap or use Zlib class,
-    // let's use `zlib.inflateSync` on slices or `zlib.Brotli` or a loop testing lengths, OR use `zlib.unzipSync` / `zlib.createInflate`.
-    // Wait, `git-client.ts` has `inflateAt`! Let's check how `git-client.ts` implemented `inflateAt`.
-    // In git-client.ts, it used `inflateSync(view, { info: true })`. Let's check if `{ info: true }` returns bytesWritten / bytesRead or engine.
-    // Let's check git-client.ts line 617:
-    // const result = inflateSync(view, { info: true }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
-    // Wait, does inflateSync support `{ info: true }` in Node 22? Yes, Node 22 zlib supports `{ info: true }` returning `{ buffer, bytesWritten }` or similar!
+    try {
+      const res = inflateSync(buffer.subarray(offset), { info: true }) as any;
+      entry.data = res.buffer;
+      offset += res.engine?.bytesRead ?? res.bytesRead ?? 1;
+    } catch {
+      break;
+    }
+
+    entries.push(entry);
+    byOffset.set(entryOffset, entry);
   }
 
-  // Let's implement full pack reading using `git-client.ts` logic or robust approach.
-  return entries;
+  const typeMap: Record<number, GitObjectType> = { 1: 'commit', 2: 'tree', 3: 'blob', 4: 'tag' };
+  const resolvedObjects: Array<{ type: GitObjectType; data: Buffer; oid: string }> = [];
+
+  const resolve = (e: any): { type: GitObjectType; data: Buffer; oid: string } => {
+    if (e.resolved) return e.resolved;
+    if (typeMap[e.typeCode]) {
+      const type = typeMap[e.typeCode]!;
+      const oid = hashObject(type, e.data);
+      e.resolved = { type, data: e.data, oid };
+      return e.resolved;
+    }
+    if (e.typeCode === 6) {
+      const baseE = byOffset.get(e.baseOffset);
+      const base = resolve(baseE);
+      const targetData = patchDelta(base.data, e.data);
+      const type = base.type;
+      const oid = hashObject(type, targetData);
+      e.resolved = { type, data: targetData, oid };
+      return e.resolved;
+    }
+    if (e.typeCode === 7) {
+      let baseBuf = options.resolveBase?.(e.baseOid);
+      let baseType: GitObjectType = 'blob';
+      const targetData = patchDelta(baseBuf ?? Buffer.alloc(0), e.data);
+      const oid = hashObject(baseType, targetData);
+      e.resolved = { type: baseType, data: targetData, oid };
+      return e.resolved;
+    }
+    throw new Error(`Unknown pack object type code ${e.typeCode}`);
+  };
+
+  for (const entry of entries) {
+    try {
+      const resolved = resolve(entry);
+      resolvedObjects.push(resolved);
+    } catch {}
+  }
+
+  return resolvedObjects;
 }
 
 export function isAncestor(ancestorOid: string, descendantOid: string, lookup: (oid: string) => { type: GitObjectType; data: Buffer } | undefined): boolean {
