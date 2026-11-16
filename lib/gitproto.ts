@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
+import { deflateSync } from 'node:zlib';
 import { MemoryStore } from './store.ts';
-import { readPack, isObjectId, isAncestor, type GitObjectType } from './gitobj.ts';
+import { readPack, isObjectId, isAncestor, parseCommit, type GitObjectType } from './gitobj.ts';
 
 export const ZERO_OID = '0'.repeat(40);
 
@@ -240,7 +241,7 @@ export function handleUploadPack(reqPath: string, bodyBuf: Buffer, store: Memory
           sz >>= 7;
         }
         packParts.push(Buffer.from(headerBytes));
-        const compressed = require('node:zlib').deflateSync(objData);
+        const compressed = deflateSync(objData);
         packParts.push(compressed);
       }
     }
@@ -275,7 +276,7 @@ export function handleReceivePack(reqPath: string, bodyBuf: Buffer, store: Memor
   const repoKey = `${owner}/${repoName}`.toLowerCase();
   
   if (!store.repos.has(repoKey)) {
-    store.createRepo(owner, repoName);
+    return { status: 404, headers: { 'content-type': 'text/plain' }, body: Buffer.from('Repository not found') };
   }
   const refsMap = store.refs.get(repoKey)!;
 
@@ -322,7 +323,15 @@ export function handleReceivePack(reqPath: string, bodyBuf: Buffer, store: Memor
     if (cmd.oldOid !== ZERO_OID && cmd.newOid !== ZERO_OID && cmd.oldOid !== cmd.newOid) {
       const isAnc = isAncestor(cmd.oldOid, cmd.newOid, (oid) => {
         const data = store.objects.get(oid);
-        return data ? { type: 'commit', data } : undefined;
+        if (!data) return undefined;
+        let type: GitObjectType = 'blob';
+        try {
+          const parsed = parseCommit(data);
+          if (parsed.tree && isObjectId(parsed.tree)) {
+            type = 'commit';
+          }
+        } catch {}
+        return { type, data };
       });
       if (!isAnc) {
         reportLines.push(`ng ${cmd.refName} non-fast-forward\n`);
