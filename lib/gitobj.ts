@@ -60,6 +60,10 @@ export function encodeLooseObject(type: GitObjectType, data: Uint8Array): Buffer
   return Buffer.concat([objectHeader(type, body.length), body]);
 }
 
+export function deflateLoose(type: GitObjectType, data: Uint8Array): Buffer {
+  return deflateSync(encodeLooseObject(type, data));
+}
+
 export function inflateLoose(compressed: Uint8Array): { type: GitObjectType; data: Buffer } {
   const inflated = inflateSync(asBuffer(compressed));
   const nul = inflated.indexOf(0x00);

@@ -135,17 +135,73 @@ export function handleUploadPack(reqPath: string, bodyBuf: Buffer, store: Memory
   const command = packets[0]?.data?.toString('utf8').trim() ?? '';
 
   if (command.startsWith('command=ls-refs')) {
-    const lines: Buffer[] = [];
-    // Always report HEAD symref if main exists
-    const mainOid = refsMap.get('refs/heads/main');
-    if (mainOid) {
-      lines.push(encodePktLine(`symref-target HEAD refs/heads/main\n`));
-    }
-    for (const [refName, oid] of refsMap.entries()) {
-      if (refName !== 'HEAD') {
-        lines.push(encodePktLine(`${oid} ${refName}\n`));
+    let peel = false;
+    let symrefs = false;
+    const prefixes: string[] = [];
+    for (const p of packets) {
+      if (p.type === 'data' && p.data) {
+        const text = p.data.toString('utf8').trim();
+        if (text === 'peel') peel = true;
+        else if (text === 'symrefs') symrefs = true;
+        else if (text.startsWith('ref-prefix ')) {
+          prefixes.push(text.slice(11).trim());
+        }
       }
     }
+
+    const mainOid = refsMap.get('refs/heads/main');
+    const lines: Buffer[] = [];
+    const keep = (name: string): boolean => prefixes.length === 0 || prefixes.some((p) => name.startsWith(p));
+
+    const peelOid = (oid: string): string | undefined => {
+      let current = oid;
+      for (let i = 0; i < 10; i++) {
+        const obj = store.objects.get(current);
+        if (!obj) break;
+        const text = obj.toString('utf8');
+        if (text.startsWith('object ')) {
+          const linesText = text.split('\n');
+          const objLine = linesText.find(l => l.startsWith('object '));
+          const typeLine = linesText.find(l => l.startsWith('type '));
+          if (objLine && typeLine && typeLine.slice(5).trim() === 'tag') {
+            current = objLine.slice(7).trim();
+            continue;
+          } else if (objLine) {
+            return objLine.slice(7).trim();
+          }
+        }
+        break;
+      }
+      return undefined;
+    };
+
+    if (mainOid && (keep('HEAD') || prefixes.length === 0)) {
+      let lineStr = `${mainOid} HEAD`;
+      if (symrefs) {
+        lineStr += ` symref-target:refs/heads/main`;
+      }
+      lineStr += '\n';
+      lines.push(encodePktLine(lineStr));
+    }
+
+    for (const [refName, oid] of refsMap.entries()) {
+      if (refName === 'HEAD') continue;
+      if (!keep(refName)) continue;
+
+      let lineStr = `${oid} ${refName}`;
+      if (symrefs && refName === 'refs/heads/main') {
+        lineStr += ` symref-target:refs/heads/main`;
+      }
+      if (peel && refName.startsWith('refs/tags/')) {
+        const peeled = peelOid(oid);
+        if (peeled) {
+          lineStr += ` peeled:${peeled}`;
+        }
+      }
+      lineStr += '\n';
+      lines.push(encodePktLine(lineStr));
+    }
+
     lines.push(pktLineFlush());
     return {
       status: 200,
@@ -194,6 +250,10 @@ export function handleUploadPack(reqPath: string, bodyBuf: Buffer, store: Memory
     const finalPack = Buffer.concat([packBuf, sha]);
 
     const outChunks: Buffer[] = [];
+    outChunks.push(encodePktLine('acknowledgments\n'));
+    outChunks.push(encodePktLine('NAK\n'));
+    outChunks.push(pktLineFlush());
+    outChunks.push(encodePktLine('packfile\n'));
     outChunks.push(encodeSideband(1, finalPack));
     outChunks.push(pktLineFlush());
 
@@ -259,7 +319,7 @@ export function handleReceivePack(reqPath: string, bodyBuf: Buffer, store: Memor
     }
 
     // Fast-forward check: if oldOid is not zero and newOid is not zero, check ancestry if object exists
-    if (cmd.oldOid !== ZERO_OID && cmd.newOid !== ZERO_OID) {
+    if (cmd.oldOid !== ZERO_OID && cmd.newOid !== ZERO_OID && cmd.oldOid !== cmd.newOid) {
       const isAnc = isAncestor(cmd.oldOid, cmd.newOid, (oid) => {
         const data = store.objects.get(oid);
         return data ? { type: 'commit', data } : undefined;
@@ -275,8 +335,13 @@ export function handleReceivePack(reqPath: string, bodyBuf: Buffer, store: Memor
       reportLines.push(`ok ${cmd.refName}\n`);
     } else {
       refsMap.set(cmd.refName, cmd.newOid);
-      if (cmd.refName === 'refs/heads/main') {
-        refsMap.set('HEAD', cmd.newOid);
+      if (cmd.refName === 'refs/heads/main' || !refsMap.has('HEAD')) {
+        if (cmd.refName.startsWith('refs/heads/') && !refsMap.has('HEAD')) {
+          refsMap.set('HEAD', cmd.newOid);
+        }
+        if (cmd.refName === 'refs/heads/main') {
+          refsMap.set('HEAD', cmd.newOid);
+        }
       }
       reportLines.push(`ok ${cmd.refName}\n`);
     }
