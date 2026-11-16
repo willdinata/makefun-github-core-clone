@@ -472,6 +472,7 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
           // Store new blob
           const newBlobOid = hashObject('blob', fileContent);
           store.objects.set(newBlobOid, fileContent);
+          store.objectTypes.set(newBlobOid, 'blob');
 
           // Build new tree recursively
           const updateTree = (treeOid: string | undefined, partsArr: string[], blobOid: string): string => {
@@ -488,6 +489,7 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
               const newTreeBuf = buildTree(filtered);
               const newTreeOid = hashObject('tree', newTreeBuf);
               store.objects.set(newTreeOid, newTreeBuf);
+              store.objectTypes.set(newTreeOid, 'tree');
               return newTreeOid;
             } else {
               // Subtree
@@ -498,6 +500,7 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
               const newTreeBuf = buildTree(filtered);
               const newTreeOid = hashObject('tree', newTreeBuf);
               store.objects.set(newTreeOid, newTreeBuf);
+              store.objectTypes.set(newTreeOid, 'tree');
               return newTreeOid;
             }
           };
@@ -515,6 +518,7 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
           });
           const newCommitSha = hashObject('commit', commitBuf);
           store.objects.set(newCommitSha, commitBuf);
+          store.objectTypes.set(newCommitSha, 'commit');
 
           refsMap.set(refName, newCommitSha);
           if (!refsMap.has('refs/heads/main') && refName !== 'refs/heads/main') {
@@ -556,6 +560,7 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
               const newTreeBuf = buildTree(filtered);
               const newTreeOid = hashObject('tree', newTreeBuf);
               store.objects.set(newTreeOid, newTreeBuf);
+              store.objectTypes.set(newTreeOid, 'tree');
               return newTreeOid;
             } else {
               const existing = entries.find(e => e.name === first && e.mode === '40000');
@@ -566,6 +571,7 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
               const newTreeBuf = buildTree(filtered);
               const newTreeOid = hashObject('tree', newTreeBuf);
               store.objects.set(newTreeOid, newTreeBuf);
+              store.objectTypes.set(newTreeOid, 'tree');
               return newTreeOid;
             }
           };
@@ -579,6 +585,7 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
           });
           const newCommitSha = hashObject('commit', commitBuf);
           store.objects.set(newCommitSha, commitBuf);
+          store.objectTypes.set(newCommitSha, 'commit');
           refsMap.set(refName, newCommitSha);
 
           sendJson(res, 200, { commit: { sha: newCommitSha } });

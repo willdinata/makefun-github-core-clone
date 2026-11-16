@@ -61,6 +61,7 @@ export function performSquashMerge(
 
   const newCommitSha = hashObject('commit', commitBuf);
   store.objects.set(newCommitSha, commitBuf);
+  store.objectTypes.set(newCommitSha, 'commit');
 
   // Update base branch ref
   refsMap.set(baseRefName, newCommitSha);

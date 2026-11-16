@@ -1,3 +1,5 @@
+import { type GitObjectType } from './gitobj.ts';
+
 export const SCENARIO_EPOCH_SEC = 1_735_689_600;
 
 export function now(): number {
@@ -88,6 +90,7 @@ export class MemoryStore {
   repos: Map<string, StoredRepo> = new Map(); // key: owner/repo
   refs: Map<string, Map<string, string>> = new Map(); // key: owner/repo -> refName -> oid
   objects: Map<string, Buffer> = new Map(); // key: oid -> raw object buffer
+  objectTypes: Map<string, GitObjectType> = new Map(); // key: oid -> object type
   labels: Map<string, Map<string, StoredLabel>> = new Map(); // key: owner/repo -> labelName -> StoredLabel
   issues: Map<string, StoredIssue[]> = new Map(); // key: owner/repo -> issues
   pulls: Map<string, StoredPullRequest[]> = new Map(); // key: owner/repo -> pulls

@@ -306,6 +306,7 @@ export function handleReceivePack(reqPath: string, bodyBuf: Buffer, store: Memor
     });
     for (const obj of parsedObjects) {
       store.objects.set(obj.oid, obj.data);
+      store.objectTypes.set(obj.oid, obj.type);
     }
   }
 
@@ -323,15 +324,7 @@ export function handleReceivePack(reqPath: string, bodyBuf: Buffer, store: Memor
     if (cmd.oldOid !== ZERO_OID && cmd.newOid !== ZERO_OID && cmd.oldOid !== cmd.newOid) {
       const isAnc = isAncestor(cmd.oldOid, cmd.newOid, (oid) => {
         const data = store.objects.get(oid);
-        if (!data) return undefined;
-        let type: GitObjectType = 'blob';
-        try {
-          const parsed = parseCommit(data);
-          if (parsed.tree && isObjectId(parsed.tree)) {
-            type = 'commit';
-          }
-        } catch {}
-        return { type, data };
+        return data ? { type: store.objectTypes.get(oid) ?? 'commit', data } : undefined;
       });
       if (!isAnc) {
         reportLines.push(`ng ${cmd.refName} non-fast-forward\n`);
