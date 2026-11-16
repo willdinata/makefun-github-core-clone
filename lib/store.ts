@@ -1,13 +1,37 @@
-import { buildScenario, type Scenario, type ScenarioUser, type ScenarioRepo, SCENARIO_EPOCH_SEC } from './wire.ts';
+export const SCENARIO_EPOCH_SEC = 1_735_689_600;
 
 export function now(): number {
   const envNow = process.env.MAKEFUN_TRIAL_NOW;
   if (envNow !== undefined && envNow !== '') {
     const parsed = Number(envNow);
     if (Number.isFinite(parsed)) return parsed;
+    const dateParsed = Date.parse(envNow);
+    if (Number.isFinite(dateParsed)) return Math.floor(dateParsed / 1000);
   }
   return SCENARIO_EPOCH_SEC;
 }
+
+export interface ScenarioUser {
+  id: number;
+  login: string;
+  name: string;
+  email: string;
+}
+
+export const USERS: readonly ScenarioUser[] = [
+  { id: 1000, login: 'adaiversen', name: 'ada iversen', email: 'adaiversen@example.invalid' },
+  { id: 1001, login: 'quinnkeller', name: 'quinn keller', email: 'quinnkeller@example.invalid' },
+  { id: 1002, login: 'olgabauer', name: 'olga bauer', email: 'olgabauer@example.invalid' },
+  { id: 1003, login: 'dmitriquist', name: 'dmitri quist', email: 'dmitriquist@example.invalid' },
+  { id: 1004, login: 'adanovak', name: 'ada novak', email: 'adanovak@example.invalid' },
+  { id: 1005, login: 'zanerossi', name: 'zane rossi', email: 'zanerossi@example.invalid' },
+  { id: 1006, login: 'pavelcosta', name: 'pavel costa', email: 'pavelcosta@example.invalid' },
+  { id: 1007, login: 'wrenkeller', name: 'wren keller', email: 'wrenkeller@example.invalid' },
+  { id: 1008, login: 'coraquist', name: 'cora quist', email: 'coraquist@example.invalid' },
+  { id: 1009, login: 'elenaulrich', name: 'elena ulrich', email: 'elenaulrich@example.invalid' },
+  { id: 1010, login: 'tesssato', name: 'tess sato', email: 'tesssato@example.invalid' },
+  { id: 1011, login: 'svenrossi', name: 'sven rossi', email: 'svenrossi@example.invalid' },
+];
 
 export interface StoredRepo {
   id: number;
@@ -60,7 +84,6 @@ export interface StoredLabel {
 }
 
 export class MemoryStore {
-  scenario: Scenario;
   users: Map<string, ScenarioUser> = new Map();
   repos: Map<string, StoredRepo> = new Map(); // key: owner/repo
   refs: Map<string, Map<string, string>> = new Map(); // key: owner/repo -> refName -> oid
@@ -74,93 +97,8 @@ export class MemoryStore {
   pullIdCounter = 1000;
 
   constructor() {
-    this.scenario = buildScenario();
-    this.initFromScenario();
-  }
-
-  private initFromScenario() {
-    // Populate users
-    for (const u of this.scenario.users) {
+    for (const u of USERS) {
       this.users.set(u.login.toLowerCase(), u);
-    }
-
-    // Populate repos, labels, issues, pulls
-    const allRepos = [...this.scenario.repos, ...this.scenario.orgRepos, ...this.scenario.strangerRepos];
-    for (const r of allRepos) {
-      const key = r.fullName.toLowerCase();
-      this.repos.set(key, {
-        id: r.id,
-        owner: r.owner,
-        name: r.name,
-        fullName: r.fullName,
-        description: r.description,
-        private: r.private,
-        defaultBranch: r.defaultBranch,
-        createdAt: now(),
-        updatedAt: now(),
-      });
-
-      // Labels
-      const repoLabels = new Map<string, StoredLabel>();
-      for (const lblName of this.scenario.labels) {
-        repoLabels.set(lblName.toLowerCase(), { name: lblName });
-      }
-      this.labels.set(key, repoLabels);
-
-      // Refs
-      const repoRefs = new Map<string, string>();
-      // We can seed a dummy HEAD and main ref if needed or git-client creates them on push/clone
-      this.refs.set(key, repoRefs);
-
-      // Issues
-      const repoIssues: StoredIssue[] = [];
-      for (let i = 0; i < this.scenario.issues.length; i++) {
-        const iss = this.scenario.issues[i];
-        if (iss) {
-          this.issueIdCounter++;
-          repoIssues.push({
-            id: this.issueIdCounter,
-            number: i + 1,
-            owner: r.owner,
-            repo: r.name,
-            title: iss.title,
-            body: iss.body,
-            state: 'open',
-            labels: [...iss.labels],
-            user: this.scenario.viewer,
-            createdAt: now(),
-            updatedAt: now(),
-            commentsCount: 0,
-          });
-        }
-      }
-      this.issues.set(key, repoIssues);
-
-      // Pulls
-      const repoPulls: StoredPullRequest[] = [];
-      for (let i = 0; i < this.scenario.pulls.length; i++) {
-        const pr = this.scenario.pulls[i];
-        if (pr) {
-          this.pullIdCounter++;
-          repoPulls.push({
-            id: this.pullIdCounter,
-            number: i + 1,
-            owner: r.owner,
-            repo: r.name,
-            title: pr.title,
-            body: pr.body,
-            state: 'open',
-            merged: false,
-            head: pr.head,
-            base: pr.base,
-            user: this.scenario.viewer,
-            createdAt: now(),
-            updatedAt: now(),
-            files: [...this.scenario.filePaths.slice(0, 3)],
-          });
-        }
-      }
-      this.pulls.set(key, repoPulls);
     }
   }
 
