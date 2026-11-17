@@ -335,3 +335,38 @@ export function isAncestor(ancestorOid: string, descendantOid: string, lookup: (
   }
   return false;
 }
+
+export function typeOfGitObject(
+  store: {
+    objects: Map<string, Buffer>;
+    objectTypes: Map<string, GitObjectType>;
+  },
+  oid: string
+): GitObjectType | undefined {
+  const cached = store.objectTypes.get(oid);
+  if (cached) return cached;
+  const payload = store.objects.get(oid);
+  if (!payload) return undefined;
+
+  const text = payload.toString('utf8');
+  if (text.startsWith('tree ') && text.includes('\nauthor ')) {
+    return 'commit';
+  }
+  if (text.startsWith('object ') && text.includes('\ntype ')) {
+    return 'tag';
+  }
+
+  try {
+    const entries = parseTree(payload);
+    let sum = 0;
+    for (const entry of entries) {
+      sum += entry.mode.length + 1 + entry.name.length + 1 + 20;
+    }
+    if (sum === payload.length || (payload.length === 0 && entries.length === 0)) {
+      return 'tree';
+    }
+  } catch {}
+
+  return 'blob';
+}
+
