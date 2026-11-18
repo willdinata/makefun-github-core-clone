@@ -3,6 +3,7 @@ import { globalStore } from './lib/store.ts';
 import { handleInfoRefs, handleUploadPack, handleReceivePack } from './lib/gitproto.ts';
 import { handleRestApi, sendJson } from './lib/rest.ts';
 import { handleGraphqlApi } from './lib/graphql.ts';
+import { handleMcpApi } from './lib/mcp.ts';
 
 function pathOf(req: IncomingMessage): string {
   try {
@@ -25,7 +26,7 @@ export function createApp(): Server {
 
       const authHeader = req.headers['authorization'];
       const expectedToken = process.env.MAKEFUN_SHOP_TOKEN;
-      if (expectedToken && path.startsWith('/api/')) {
+      if (expectedToken && (path.startsWith('/api/') || path === '/mcp')) {
         if (!authHeader || authHeader !== `Bearer ${expectedToken}`) {
           sendJson(res, 401, { message: 'Unauthorized' });
           return;
@@ -68,6 +69,11 @@ export function createApp(): Server {
 
       if (path === '/api/graphql') {
         const handled = await handleGraphqlApi(req, res, globalStore);
+        if (handled) return;
+      }
+
+      if (path === '/mcp') {
+        const handled = await handleMcpApi(req, res, globalStore);
         if (handled) return;
       }
 
