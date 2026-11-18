@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { MemoryStore } from './store.ts';
-import { readPack, isObjectId, isAncestor, parseCommit, type GitObjectType } from './gitobj.ts';
+import { readPack, isObjectId, isAncestor, parseCommit, type GitObjectType, collectGitClosure, buildGitPack, typeOfGitObject } from './gitobj.ts';
 
 export const ZERO_OID = '0'.repeat(40);
 
@@ -211,61 +211,83 @@ export function handleUploadPack(reqPath: string, bodyBuf: Buffer, store: Memory
     };
   } else if (command.startsWith('command=fetch')) {
     const wants: string[] = [];
+    const haves: string[] = [];
+    let deepenN = 0;
     for (const p of packets) {
       if (p.type === 'data' && p.data) {
         const text = p.data.toString('utf8').trim();
         if (text.startsWith('want ')) {
           wants.push(text.slice(5).trim());
+        } else if (text.startsWith('have ')) {
+          haves.push(text.slice(5).trim());
+        } else if (text.startsWith('deepen ')) {
+          deepenN = parseInt(text.slice(7).trim(), 10) || 0;
         }
       }
     }
 
-    const packParts: Buffer[] = [];
-    const hdr = Buffer.alloc(12);
-    hdr.write('PACK', 0, 4, 'ascii');
-    hdr.writeUInt32BE(2, 4);
-    hdr.writeUInt32BE(wants.length, 8);
-    packParts.push(hdr);
+    const haveClosure = collectGitClosure(store, haves, 0);
+    const haveSet = new Set(haveClosure.objects.keys());
 
-    for (const wantOid of wants) {
-      const objData = store.objects.get(wantOid);
-      if (objData) {
-        const typeCode = 3; // blob/commit
-        const size = objData.length;
-        const headerBytes: number[] = [];
-        let sz = size;
-        headerBytes.push(((typeCode & 7) << 4) | (sz & 15));
-        sz >>= 4;
-        while (sz > 0) {
-          headerBytes.push(0x80 | (sz & 0x7f));
-          sz >>= 7;
-        }
-        packParts.push(Buffer.from(headerBytes));
-        const compressed = deflateSync(objData);
-        packParts.push(compressed);
+    const { objects: sendMap, shallowBoundary } = collectGitClosure(store, wants, deepenN);
+    for (const oid of haveSet) {
+      sendMap.delete(oid);
+    }
+
+    const chunks: Buffer[] = [];
+    chunks.push(encodePktLine('acknowledgments\n'));
+    chunks.push(encodePktLine('NAK\n'));
+    chunks.push(Buffer.from('0001', 'ascii'));
+
+    if (deepenN > 0 && shallowBoundary.length > 0) {
+      chunks.push(encodePktLine('shallow-info\n'));
+      for (const bOid of shallowBoundary) {
+        chunks.push(encodePktLine(`shallow ${bOid}\n`));
+      }
+      chunks.push(Buffer.from('0001', 'ascii'));
+    }
+
+    if (sendMap.size > 0) {
+      chunks.push(encodePktLine('packfile\n'));
+      const packBuf = buildGitPack(sendMap);
+      const maxChunk = 65516;
+      for (let off = 0; off < packBuf.length; off += maxChunk) {
+        const chunk = packBuf.subarray(off, off + maxChunk);
+        chunks.push(encodeSideband(1, chunk));
       }
     }
 
-    const packBuf = Buffer.concat(packParts);
-    const sha = createHash('sha1').update(packBuf).digest();
-    const finalPack = Buffer.concat([packBuf, sha]);
-
-    const outChunks: Buffer[] = [];
-    outChunks.push(encodePktLine('acknowledgments\n'));
-    outChunks.push(encodePktLine('NAK\n'));
-    outChunks.push(pktLineFlush());
-    outChunks.push(encodePktLine('packfile\n'));
-    outChunks.push(encodeSideband(1, finalPack));
-    outChunks.push(pktLineFlush());
+    chunks.push(pktLineFlush());
 
     return {
       status: 200,
       headers: { 'content-type': 'application/x-git-upload-pack-result' },
-      body: Buffer.concat(outChunks),
+      body: Buffer.concat(chunks),
     };
   }
 
   return { status: 400, headers: { 'content-type': 'text/plain' }, body: Buffer.from('Unsupported command') };
+}
+
+function peelTagOid(store: MemoryStore, oid: string): string {
+  let current = oid;
+  for (let i = 0; i < 10; i++) {
+    if (typeOfGitObject(store, current) !== 'tag') break;
+    const payload = store.objects.get(current);
+    if (!payload) break;
+    const text = payload.toString('utf8');
+    const linesText = text.split('\n');
+    const objLine = linesText.find(l => l.startsWith('object '));
+    const typeLine = linesText.find(l => l.startsWith('type '));
+    if (objLine && typeLine && typeLine.slice(5).trim() === 'tag') {
+      current = objLine.slice(7).trim();
+      continue;
+    } else if (objLine) {
+      return objLine.slice(7).trim();
+    }
+    break;
+  }
+  return current;
 }
 
 export function handleReceivePack(reqPath: string, bodyBuf: Buffer, store: MemoryStore): { status: number; headers: Record<string, string>; body: Buffer } {
@@ -322,13 +344,17 @@ export function handleReceivePack(reqPath: string, bodyBuf: Buffer, store: Memor
 
     // Fast-forward check: if oldOid is not zero and newOid is not zero, check ancestry if object exists
     if (cmd.oldOid !== ZERO_OID && cmd.newOid !== ZERO_OID && cmd.oldOid !== cmd.newOid) {
-      const isAnc = isAncestor(cmd.oldOid, cmd.newOid, (oid) => {
-        const data = store.objects.get(oid);
-        return data ? { type: store.objectTypes.get(oid) ?? 'commit', data } : undefined;
-      });
-      if (!isAnc) {
-        reportLines.push(`ng ${cmd.refName} non-fast-forward\n`);
-        continue;
+      const baseOid = peelTagOid(store, cmd.oldOid);
+      const targetOid = peelTagOid(store, cmd.newOid);
+      if (baseOid !== targetOid) {
+        const isAnc = isAncestor(baseOid, targetOid, (oid) => {
+          const data = store.objects.get(oid);
+          return data ? { type: typeOfGitObject(store, oid) ?? 'commit', data } : undefined;
+        });
+        if (!isAnc) {
+          reportLines.push(`ng ${cmd.refName} non-fast-forward\n`);
+          continue;
+        }
       }
     }
 
