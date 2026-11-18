@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { globalStore } from './lib/store.ts';
 import { handleInfoRefs, handleUploadPack, handleReceivePack } from './lib/gitproto.ts';
 import { handleRestApi, sendJson } from './lib/rest.ts';
+import { handleGraphqlApi } from './lib/graphql.ts';
 
 function pathOf(req: IncomingMessage): string {
   try {
@@ -62,6 +63,11 @@ export function createApp(): Server {
 
       if (path.startsWith('/api/v3')) {
         const handled = await handleRestApi(req, res, globalStore);
+        if (handled) return;
+      }
+
+      if (path === '/api/graphql') {
+        const handled = await handleGraphqlApi(req, res, globalStore);
         if (handled) return;
       }
 
