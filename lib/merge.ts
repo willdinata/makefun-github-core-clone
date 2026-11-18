@@ -1,5 +1,5 @@
 import { MemoryStore } from './store.ts';
-import { parseCommit, buildCommit, hashObject, deflateLoose } from './gitobj.ts';
+import { parseCommit, buildCommit, hashObject, deflateLoose, getFilesFromTree } from './gitobj.ts';
 import { now } from './store.ts';
 
 export function performSquashMerge(
@@ -48,6 +48,72 @@ export function performSquashMerge(
 
   const headCommit = parseCommit(headCommitObj);
   const baseOid = refsMap.get(baseRefName) ?? refsMap.get('refs/heads/main');
+
+  if (baseOid && headOid) {
+    // 3-way conflict check
+    const baseAncestors = new Set<string>();
+    const queue = [baseOid];
+    while (queue.length > 0) {
+      const curr = queue.shift()!;
+      if (baseAncestors.has(curr)) continue;
+      baseAncestors.add(curr);
+      const obj = store.objects.get(curr);
+      if (!obj) continue;
+      try {
+        const commit = parseCommit(obj);
+        for (const p of commit.parents) {
+          if (!baseAncestors.has(p)) queue.push(p);
+        }
+      } catch {}
+    }
+
+    let mergeBaseOid: string | undefined = undefined;
+    const headQueue = [headOid];
+    const headVisited = new Set<string>();
+    while (headQueue.length > 0) {
+      const curr = headQueue.shift()!;
+      if (baseAncestors.has(curr)) {
+        mergeBaseOid = curr;
+        break;
+      }
+      if (headVisited.has(curr)) continue;
+      headVisited.add(curr);
+      const obj = store.objects.get(curr);
+      if (!obj) continue;
+      try {
+        const commit = parseCommit(obj);
+        for (const p of commit.parents) {
+          if (!headVisited.has(p)) headQueue.push(p);
+        }
+      } catch {}
+    }
+
+    if (mergeBaseOid) {
+      const mbCommit = parseCommit(store.objects.get(mergeBaseOid)!);
+      const baseCommit = parseCommit(store.objects.get(baseOid)!);
+
+      const mbFiles = getFilesFromTree(store, mbCommit.tree);
+      const baseFiles = getFilesFromTree(store, baseCommit.tree);
+      const headFiles = getFilesFromTree(store, headCommit.tree);
+
+      const allPaths = new Set([...mbFiles.keys(), ...baseFiles.keys(), ...headFiles.keys()]);
+      for (const path of allPaths) {
+        const mbOid = mbFiles.get(path);
+        const baseFileOid = baseFiles.get(path);
+        const headFileOid = headFiles.get(path);
+
+        const baseChanged = baseFileOid !== mbOid;
+        const headChanged = headFileOid !== mbOid;
+
+        if (baseChanged && headChanged && baseFileOid !== headFileOid) {
+          return {
+            status: 405,
+            body: { message: `Merge conflict in ${path}` },
+          };
+        }
+      }
+    }
+  }
 
   const parents = baseOid ? [baseOid] : [];
   const message = commitMessage || `Merge pull request #${pr.number} from ${pr.head}\n\n${pr.title}`;

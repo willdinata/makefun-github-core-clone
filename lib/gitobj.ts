@@ -96,6 +96,32 @@ export function parseTree(data: Uint8Array): TreeEntry[] {
   return entries;
 }
 
+export function getFilesFromTree(
+  store: { objects: Map<string, Buffer> },
+  treeOid: string,
+  prefix = ''
+): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!treeOid || !store.objects.has(treeOid)) return map;
+  const payload = store.objects.get(treeOid);
+  if (!payload) return map;
+  try {
+    const entries = parseTree(payload);
+    for (const entry of entries) {
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.mode === '40000') {
+        const subMap = getFilesFromTree(store, entry.oid, path);
+        for (const [subPath, subOid] of subMap.entries()) {
+          map.set(subPath, subOid);
+        }
+      } else {
+        map.set(path, entry.oid);
+      }
+    }
+  } catch {}
+  return map;
+}
+
 function compareTreeNames(a: { name: string; mode: string }, b: { name: string; mode: string }): number {
   const left = Buffer.from(a.mode === '40000' ? `${a.name}/` : a.name, 'utf8');
   const right = Buffer.from(b.mode === '40000' ? `${b.name}/` : b.name, 'utf8');
@@ -464,30 +490,17 @@ export function buildGitPack(objects: Map<string, { type: GitObjectType; data: B
     else if (entry.type === 'blob') typeCode = 3;
     else if (entry.type === 'tag') typeCode = 4;
 
-    let first = (typeCode << 4) | (size & 0x0f);
+    const bytes: number[] = [];
+    let b = (typeCode << 4) | (size & 0x0f);
     size >>= 4;
-    const rest: number[] = [];
     while (size > 0) {
-      rest.push(size & 0x7f);
+      bytes.push(b | 0x80);
+      b = size & 0x7f;
       size >>= 7;
     }
+    bytes.push(b & 0x7f);
 
-    const headerBytes: number[] = [];
-    if (rest.length > 0) {
-      headerBytes.push(first | 0x80);
-      for (let i = 0; i < rest.length; i++) {
-        const b = rest[i]!;
-        if (i === rest.length - 1) {
-          headerBytes.push(b & 0x7f);
-        } else {
-          headerBytes.push(b | 0x80);
-        }
-      }
-    } else {
-      headerBytes.push(first);
-    }
-
-    chunks.push(Buffer.from(headerBytes));
+    chunks.push(Buffer.from(bytes));
     chunks.push(deflateSync(payload));
   }
 

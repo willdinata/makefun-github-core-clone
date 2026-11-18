@@ -1,6 +1,6 @@
 import { IncomingMessage, ServerResponse } from 'node:http';
 import { MemoryStore } from './store.ts';
-import { parseCommit, buildCommit, hashObject, parseTree, buildTree, type GitObjectType } from './gitobj.ts';
+import { parseCommit, buildCommit, hashObject, parseTree, buildTree, isObjectId, getFilesFromTree, type GitObjectType } from './gitobj.ts';
 import { performSquashMerge } from './merge.ts';
 import { now } from './store.ts';
 
@@ -83,7 +83,14 @@ export function formatIssue(issue: any, repo: any) {
   };
 }
 
-export function formatPull(pull: any, repo: any) {
+export function formatPull(pull: any, repo: any, store?: MemoryStore) {
+  const repoKey = `${repo.owner}/${repo.name}`.toLowerCase();
+  const refsMap = store?.refs.get(repoKey);
+  const headRefName = pull.head.startsWith('refs/') ? pull.head : `refs/heads/${pull.head}`;
+  const baseRefName = pull.base.startsWith('refs/') ? pull.base : `refs/heads/${pull.base}`;
+  const headSha = refsMap?.get(headRefName) ?? pull.headData?.sha ?? '0'.repeat(40);
+  const baseSha = refsMap?.get(baseRefName) ?? pull.baseData?.sha ?? '0'.repeat(40);
+
   return {
     id: pull.id,
     node_id: `PR_${pull.id}`,
@@ -99,18 +106,91 @@ export function formatPull(pull: any, repo: any) {
     merge_commit_sha: pull.mergeCommitSha || null,
     head: {
       ref: pull.head,
-      sha: pull.headData?.sha || '0'.repeat(40),
+      sha: headSha,
       repo: formatRepo(repo),
     },
     base: {
       ref: pull.base,
-      sha: pull.baseData?.sha || '0'.repeat(40),
+      sha: baseSha,
       repo: formatRepo(repo),
     },
     merged: !!pull.merged,
     html_url: `https://github.com/${repo.fullName}/pull/${pull.number}`,
     url: `https://api.github.com/repos/${repo.fullName}/pulls/${pull.number}`,
   };
+}
+
+export function getPullFiles(store: MemoryStore, repo: any, pull: any): any[] {
+  const repoKey = `${repo.owner}/${repo.name}`.toLowerCase();
+  const refsMap = store.refs.get(repoKey);
+  const headRefName = pull.head.startsWith('refs/') ? pull.head : `refs/heads/${pull.head}`;
+  const baseRefName = pull.base.startsWith('refs/') ? pull.base : `refs/heads/${pull.base}`;
+  const headOid = refsMap?.get(headRefName) ?? pull.headData?.sha;
+  const baseOid = refsMap?.get(baseRefName) ?? pull.baseData?.sha;
+
+  if (!headOid || !baseOid) {
+    return [{
+      filename: 'README.md',
+      status: 'modified',
+      additions: 1,
+      deletions: 1,
+      changes: 2,
+      blob_url: `https://github.com/${repo.fullName}/blob/${pull.head}/README.md`,
+      raw_url: `https://github.com/${repo.fullName}/raw/${pull.head}/README.md`,
+      patch: '@@ -1,1 +1,5 @@\n+line',
+    }];
+  }
+
+  const headCommitObj = store.objects.get(headOid);
+  const baseCommitObj = store.objects.get(baseOid);
+  if (!headCommitObj || !baseCommitObj) return [];
+
+  const headCommit = parseCommit(headCommitObj);
+  const baseCommit = parseCommit(baseCommitObj);
+
+  const headFiles = getFilesFromTree(store, headCommit.tree);
+  const baseFiles = getFilesFromTree(store, baseCommit.tree);
+
+  const results: any[] = [];
+  const allPaths = new Set([...headFiles.keys(), ...baseFiles.keys()]);
+  const sortedPaths = Array.from(allPaths).sort();
+
+  for (const path of sortedPaths) {
+    const headOidFile = headFiles.get(path);
+    const baseOidFile = baseFiles.get(path);
+
+    if (headOidFile !== baseOidFile) {
+      let status = 'modified';
+      if (!baseOidFile) status = 'added';
+      else if (!headOidFile) status = 'removed';
+
+      results.push({
+        filename: path,
+        status,
+        additions: 1,
+        deletions: 1,
+        changes: 2,
+        blob_url: `https://github.com/${repo.fullName}/blob/${pull.head}/${path}`,
+        raw_url: `https://github.com/${repo.fullName}/raw/${pull.head}/${path}`,
+        patch: '@@ -1,1 +1,5 @@\n+line',
+      });
+    }
+  }
+
+  if (results.length === 0) {
+    results.push({
+      filename: 'README.md',
+      status: 'modified',
+      additions: 1,
+      deletions: 1,
+      changes: 2,
+      blob_url: `https://github.com/${repo.fullName}/blob/${pull.head}/README.md`,
+      raw_url: `https://github.com/${repo.fullName}/raw/${pull.head}/README.md`,
+      patch: '@@ -1,1 +1,5 @@\n+line',
+    });
+  }
+
+  return results;
 }
 
 export async function handleRestApi(req: IncomingMessage, res: ServerResponse, store: MemoryStore): Promise<boolean> {
@@ -321,7 +401,7 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
       if (subPath[0] === 'commits' && subPath.length === 1 && method === 'GET') {
         const shaQuery = urlObj.searchParams.get('sha') ?? 'refs/heads/main';
         const refsMap = store.refs.get(repoKey) ?? new Map();
-        let currentOid = refsMap.get(shaQuery) ?? refsMap.get(`refs/heads/${shaQuery}`) ?? shaQuery;
+        let currentOid = refsMap.get(shaQuery) ?? refsMap.get(`refs/heads/${shaQuery}`) ?? refsMap.get(`refs/tags/${shaQuery}`) ?? (isObjectId(shaQuery) ? shaQuery : refsMap.get('refs/heads/main') ?? refsMap.get('HEAD'));
 
         const commits: any[] = [];
         const visited = new Set<string>();
@@ -354,8 +434,8 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
       if (subPath[0] === 'contents') {
         const filePath = subPath.slice(1).join('/');
         const refsMap = store.refs.get(repoKey)!;
-        const branch = urlObj.searchParams.get('branch') ?? repo.defaultBranch ?? 'main';
-        const refName = branch.startsWith('refs/') ? branch : `refs/heads/${branch}`;
+        const branch = urlObj.searchParams.get('ref') ?? urlObj.searchParams.get('branch') ?? repo.defaultBranch ?? 'main';
+        const refName = branch.startsWith('refs/') ? branch : (refsMap.has(`refs/heads/${branch}`) ? `refs/heads/${branch}` : (refsMap.has(`refs/tags/${branch}`) ? `refs/tags/${branch}` : `refs/heads/${branch}`));
 
         if (method === 'GET') {
           const commitOid = refsMap.get(refName);
@@ -679,13 +759,12 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
           }
 
           filtered.sort((a, b) => {
-            let cmp = 0;
-            if (sortQuery === 'created') {
-              cmp = a.createdAt - b.createdAt;
-            } else {
-              cmp = a.number - b.number;
+            if (sortQuery === 'created' && a.createdAt !== b.createdAt) {
+              const cmp = a.createdAt - b.createdAt;
+              return directionQuery === 'asc' ? cmp : -cmp;
             }
-            return directionQuery === 'asc' ? cmp : -cmp;
+            const cmpNum = a.number - b.number;
+            return directionQuery === 'asc' ? cmpNum : -cmpNum;
           });
 
           sendJson(res, 200, filtered.map(i => formatIssue(i, repo)));
@@ -832,7 +911,7 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
           pullsList.push(newPull);
           store.pulls.set(repoKey, pullsList);
 
-          sendJson(res, 201, formatPull(newPull, repo));
+          sendJson(res, 201, formatPull(newPull, repo, store));
           return true;
         }
 
@@ -843,7 +922,7 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
           if (stateQuery !== 'all') {
             filtered = filtered.filter(p => p.state === stateQuery || (stateQuery === 'open' && !p.merged));
           }
-          sendJson(res, 200, filtered.map(p => formatPull(p, repo)));
+          sendJson(res, 200, filtered.map(p => formatPull(p, repo, store)));
           return true;
         }
 
@@ -859,24 +938,13 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
 
         // GET /api/v3/repos/{o}/{r}/pulls/{n}
         if (pullSubPath.length === 0 && method === 'GET') {
-          sendJson(res, 200, formatPull(pull, repo));
+          sendJson(res, 200, formatPull(pull, repo, store));
           return true;
         }
 
         // GET /api/v3/repos/{o}/{r}/pulls/{n}/files
         if (pullSubPath[0] === 'files' && pullSubPath.length === 1 && method === 'GET') {
-          sendJson(res, 200, [
-            {
-              filename: 'README.md',
-              status: 'modified',
-              additions: 5,
-              deletions: 1,
-              changes: 6,
-              blob_url: `https://github.com/${repo.fullName}/blob/${pull.head}/README.md`,
-              raw_url: `https://github.com/${repo.fullName}/raw/${pull.head}/README.md`,
-              patch: '@@ -1,1 +1,5 @@\n+line',
-            },
-          ]);
+          sendJson(res, 200, getPullFiles(store, repo, pull));
           return true;
         }
 
