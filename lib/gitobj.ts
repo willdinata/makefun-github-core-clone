@@ -447,4 +447,53 @@ export function collectGitClosure(
   return { objects, shallowBoundary };
 }
 
+export function buildGitPack(objects: Map<string, { type: GitObjectType; data: Buffer }>): Buffer {
+  const header = Buffer.alloc(12);
+  header.write('PACK', 0, 'ascii');
+  header.writeUInt32BE(2, 4);
+  header.writeUInt32BE(objects.size, 8);
+
+  const chunks: Buffer[] = [header];
+
+  for (const [_, entry] of objects) {
+    const payload = entry.data;
+    let size = payload.length;
+    let typeCode = 3;
+    if (entry.type === 'commit') typeCode = 1;
+    else if (entry.type === 'tree') typeCode = 2;
+    else if (entry.type === 'blob') typeCode = 3;
+    else if (entry.type === 'tag') typeCode = 4;
+
+    let first = (typeCode << 4) | (size & 0x0f);
+    size >>= 4;
+    const rest: number[] = [];
+    while (size > 0) {
+      rest.push(size & 0x7f);
+      size >>= 7;
+    }
+
+    const headerBytes: number[] = [];
+    if (rest.length > 0) {
+      headerBytes.push(first | 0x80);
+      for (let i = 0; i < rest.length; i++) {
+        const b = rest[i]!;
+        if (i === rest.length - 1) {
+          headerBytes.push(b & 0x7f);
+        } else {
+          headerBytes.push(b | 0x80);
+        }
+      }
+    } else {
+      headerBytes.push(first);
+    }
+
+    chunks.push(Buffer.from(headerBytes));
+    chunks.push(deflateSync(payload));
+  }
+
+  const preceding = Buffer.concat(chunks);
+  const hash = createHash('sha1').update(preceding).digest();
+  return Buffer.concat([preceding, hash]);
+}
+
 
