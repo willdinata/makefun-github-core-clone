@@ -244,7 +244,7 @@ export interface PackEntry {
   data?: Buffer;
 }
 
-export function readPack(pack: Uint8Array, options: { resolveBase?: (oid: string) => Buffer | undefined } = {}): Array<{ type: GitObjectType; data: Buffer; oid: string }> {
+export function readPack(pack: Uint8Array, options: { resolveBase?: (oid: string) => { type: GitObjectType; data: Buffer } | undefined } = {}): Array<{ type: GitObjectType; data: Buffer; oid: string }> {
   const buffer = asBuffer(pack);
   if (buffer.length < 32) return [];
   if (buffer.subarray(0, 4).toString('ascii') !== 'PACK') return [];
@@ -256,6 +256,7 @@ export function readPack(pack: Uint8Array, options: { resolveBase?: (oid: string
 
   for (let i = 0; i < numObjects; i++) {
     const entryOffset = offset;
+    if (offset >= buffer.length - 20) break;
     let byte = buffer[offset++]!;
     let typeCode = (byte >> 4) & 7;
     let size = byte & 15;
@@ -284,14 +285,24 @@ export function readPack(pack: Uint8Array, options: { resolveBase?: (oid: string
       offset += 20;
     }
 
-    try {
-      const res = inflateSync(buffer.subarray(offset), { info: true }) as any;
-      entry.data = res.buffer;
-      offset += res.engine?.bytesRead ?? res.bytesRead ?? 1;
-    } catch {
+    const remaining = buffer.subarray(offset, buffer.length - 20);
+    let inflatedData: Buffer | undefined;
+    let consumed = 0;
+
+    for (let l = 1; l <= remaining.length; l++) {
+      try {
+        inflatedData = inflateSync(remaining.subarray(0, l));
+        consumed = l;
+        break;
+      } catch {}
+    }
+
+    if (!inflatedData) {
       break;
     }
 
+    entry.data = inflatedData;
+    offset += consumed;
     entries.push(entry);
     byOffset.set(entryOffset, entry);
   }
@@ -317,9 +328,24 @@ export function readPack(pack: Uint8Array, options: { resolveBase?: (oid: string
       return e.resolved;
     }
     if (e.typeCode === 7) {
-      let baseBuf = options.resolveBase?.(e.baseOid);
       let baseType: GitObjectType = 'blob';
-      const targetData = patchDelta(baseBuf ?? Buffer.alloc(0), e.data);
+      let baseData = Buffer.alloc(0);
+
+      const localBase = resolvedObjects.find(r => r.oid === e.baseOid) ||
+        (Array.from(byOffset.values()).find(entry => entry.resolved?.oid === e.baseOid)?.resolved);
+
+      if (localBase) {
+        baseType = localBase.type;
+        baseData = localBase.data;
+      } else {
+        const resolvedBase = options.resolveBase?.(e.baseOid);
+        if (resolvedBase) {
+          baseType = resolvedBase.type;
+          baseData = resolvedBase.data;
+        }
+      }
+
+      const targetData = patchDelta(baseData, e.data);
       const oid = hashObject(baseType, targetData);
       e.resolved = { type: baseType, data: targetData, oid };
       return e.resolved;

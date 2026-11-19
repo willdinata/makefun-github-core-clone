@@ -324,7 +324,11 @@ export function handleReceivePack(reqPath: string, bodyBuf: Buffer, store: Memor
   if (packIndex >= 0) {
     const packBytes = bodyBuf.subarray(packIndex);
     const parsedObjects = readPack(packBytes, {
-      resolveBase: (oid) => store.objects.get(oid),
+      resolveBase: (oid) => {
+        const data = store.objects.get(oid);
+        const type = store.objectTypes.get(oid) ?? typeOfGitObject(store, oid);
+        return data && type ? { type, data } : (data ? { type: 'blob', data } : undefined);
+      },
     });
     for (const obj of parsedObjects) {
       store.objects.set(obj.oid, obj.data);
