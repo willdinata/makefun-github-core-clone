@@ -17,10 +17,22 @@ export function pktLineFlush(): Buffer {
 }
 
 export function encodeSideband(channel: number, data: Uint8Array): Buffer {
-  const payload = Buffer.allocUnsafe(data.length + 1);
-  payload[0] = channel & 0xff;
-  data.copy(payload, 1);
-  return encodePktLine(payload);
+  const maxPayload = 65515;
+  if (data.length <= maxPayload) {
+    const payload = Buffer.allocUnsafe(data.length + 1);
+    payload[0] = channel & 0xff;
+    data.copy(payload, 1);
+    return encodePktLine(payload);
+  }
+  const parts: Buffer[] = [];
+  for (let off = 0; off < data.length; off += maxPayload) {
+    const chunk = data.subarray(off, off + maxPayload);
+    const payload = Buffer.allocUnsafe(chunk.length + 1);
+    payload[0] = channel & 0xff;
+    chunk.copy(payload, 1);
+    parts.push(encodePktLine(payload));
+  }
+  return Buffer.concat(parts);
 }
 
 export function decodePktLines(buffer: Buffer): Array<{ type: 'data' | 'flush' | 'delim' | 'end'; data?: Buffer }> {

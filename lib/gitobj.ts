@@ -428,10 +428,12 @@ export function collectGitClosure(
     objectTypes: Map<string, GitObjectType>;
   },
   tipOids: string[],
-  maxCommitDepth: number
+  maxCommitDepth: number,
+  shallowOids?: readonly string[]
 ): { objects: Map<string, { type: GitObjectType; data: Buffer }>; shallowBoundary: string[] } {
   const objects = new Map<string, { type: GitObjectType; data: Buffer }>();
   const boundarySet = new Set<string>();
+  const shallowSet = new Set(shallowOids ?? []);
   const stack: { oid: string; depth: number }[] = [];
   const seen = new Set<string>();
 
@@ -472,7 +474,9 @@ export function collectGitClosure(
         stack.push({ oid: commit.tree, depth: 0 });
       }
       const effectiveDepth = depth === 0 ? 1 : depth;
-      if (maxCommitDepth > 0 && effectiveDepth >= maxCommitDepth) {
+      if (shallowSet.has(oid)) {
+        boundarySet.add(oid);
+      } else if (maxCommitDepth > 0 && effectiveDepth >= maxCommitDepth) {
         boundarySet.add(oid);
       } else {
         for (const parent of commit.parents) {
