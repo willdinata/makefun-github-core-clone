@@ -434,7 +434,19 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
       if (subPath[0] === 'contents') {
         const filePath = subPath.slice(1).join('/');
         const refsMap = store.refs.get(repoKey)!;
-        const branch = urlObj.searchParams.get('ref') ?? urlObj.searchParams.get('branch') ?? repo.defaultBranch ?? 'main';
+
+        let body: any = {};
+        if (method === 'PUT' || method === 'DELETE') {
+          try {
+            body = await readJsonBody();
+          } catch {
+            sendJson(res, 400, { message: 'Bad Request' });
+            return true;
+          }
+        }
+
+        // Resolve branch/ref supporting body.branch (GitHub REST spec for PUT/DELETE contents), query ref/branch, or default branch
+        const branch = body.branch ?? urlObj.searchParams.get('ref') ?? urlObj.searchParams.get('branch') ?? repo.defaultBranch ?? 'main';
         const refName = branch.startsWith('refs/') ? branch : (refsMap.has(`refs/heads/${branch}`) ? `refs/heads/${branch}` : (refsMap.has(`refs/tags/${branch}`) ? `refs/tags/${branch}` : `refs/heads/${branch}`));
 
         if (method === 'GET') {
@@ -504,13 +516,6 @@ export async function handleRestApi(req: IncomingMessage, res: ServerResponse, s
         }
 
         if (method === 'PUT') {
-          let body: any;
-          try {
-            body = await readJsonBody();
-          } catch {
-            sendJson(res, 400, { message: 'Bad Request' });
-            return true;
-          }
           const contentBase64 = body.content ?? '';
           const fileContent = Buffer.from(contentBase64, 'base64');
           const clientSha = body.sha;
