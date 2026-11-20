@@ -289,12 +289,13 @@ export function readPack(pack: Uint8Array, options: { resolveBase?: (oid: string
     let inflatedData: Buffer | undefined;
     let consumed = 0;
 
-    for (let l = 1; l <= remaining.length; l++) {
-      try {
-        inflatedData = inflateSync(remaining.subarray(0, l));
-        consumed = l;
-        break;
-      } catch {}
+    try {
+      // Single-pass O(N) zlib inflation using info: true to extract buffer and exact bytesWritten consumed
+      const res = inflateSync(remaining, { info: true }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
+      inflatedData = res.buffer;
+      consumed = res.engine.bytesWritten;
+    } catch {
+      break;
     }
 
     if (!inflatedData) {
