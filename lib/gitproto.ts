@@ -224,6 +224,7 @@ export function handleUploadPack(reqPath: string, bodyBuf: Buffer, store: Memory
   } else if (command.startsWith('command=fetch')) {
     const wants: string[] = [];
     const haves: string[] = [];
+    const clientShallow: string[] = [];
     let deepenN = 0;
     for (const p of packets) {
       if (p.type === 'data' && p.data) {
@@ -232,27 +233,34 @@ export function handleUploadPack(reqPath: string, bodyBuf: Buffer, store: Memory
           wants.push(text.slice(5).trim());
         } else if (text.startsWith('have ')) {
           haves.push(text.slice(5).trim());
+        } else if (text.startsWith('shallow ')) {
+          clientShallow.push(text.slice(8).trim());
         } else if (text.startsWith('deepen ')) {
           deepenN = parseInt(text.slice(7).trim(), 10) || 0;
         }
       }
     }
 
-    const haveClosure = collectGitClosure(store, haves, 0);
+    const haveClosure = collectGitClosure(store, haves, 0, clientShallow);
     const haveSet = new Set(haveClosure.objects.keys());
 
-    const { objects: sendMap, shallowBoundary } = collectGitClosure(store, wants, deepenN);
+    const { objects: sendMap, shallowBoundary } = collectGitClosure(store, wants, deepenN, clientShallow);
     for (const oid of haveSet) {
       sendMap.delete(oid);
     }
+
+    const unshallowOids = clientShallow.filter((oid) => sendMap.has(oid));
 
     const chunks: Buffer[] = [];
     chunks.push(encodePktLine('acknowledgments\n'));
     chunks.push(encodePktLine('NAK\n'));
     chunks.push(Buffer.from('0001', 'ascii'));
 
-    if (deepenN > 0 && shallowBoundary.length > 0) {
+    if ((deepenN > 0 || clientShallow.length > 0) && (shallowBoundary.length > 0 || unshallowOids.length > 0)) {
       chunks.push(encodePktLine('shallow-info\n'));
+      for (const uOid of unshallowOids) {
+        chunks.push(encodePktLine(`unshallow ${uOid}\n`));
+      }
       for (const bOid of shallowBoundary) {
         chunks.push(encodePktLine(`shallow ${bOid}\n`));
       }

@@ -434,19 +434,19 @@ export function collectGitClosure(
   const objects = new Map<string, { type: GitObjectType; data: Buffer }>();
   const boundarySet = new Set<string>();
   const shallowSet = new Set(shallowOids ?? []);
-  const stack: { oid: string; depth: number }[] = [];
+  const stack: { oid: string; depth: number; isTip?: boolean }[] = [];
   const seen = new Set<string>();
 
   for (const tip of tipOids) {
     if (!seen.has(tip)) {
       seen.add(tip);
-      stack.push({ oid: tip, depth: 1 });
+      stack.push({ oid: tip, depth: 1, isTip: true });
     }
   }
 
   while (stack.length > 0) {
     const item = stack.pop()!;
-    const { oid } = item;
+    const { oid, isTip } = item;
     let { depth } = item;
 
     if (objects.has(oid)) continue;
@@ -474,7 +474,7 @@ export function collectGitClosure(
         stack.push({ oid: commit.tree, depth: 0 });
       }
       const effectiveDepth = depth === 0 ? 1 : depth;
-      if (shallowSet.has(oid)) {
+      if (!isTip && shallowSet.has(oid)) {
         boundarySet.add(oid);
       } else if (maxCommitDepth > 0 && effectiveDepth >= maxCommitDepth) {
         boundarySet.add(oid);
@@ -482,7 +482,7 @@ export function collectGitClosure(
         for (const parent of commit.parents) {
           if (parent && !seen.has(parent)) {
             seen.add(parent);
-            stack.push({ oid: parent, depth: effectiveDepth + 1 });
+            stack.push({ oid: parent, depth: effectiveDepth + 1, isTip: false });
           }
         }
       }
