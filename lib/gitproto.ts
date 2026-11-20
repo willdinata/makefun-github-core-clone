@@ -241,8 +241,26 @@ export function handleUploadPack(reqPath: string, bodyBuf: Buffer, store: Memory
       }
     }
 
-    const haveClosure = collectGitClosure(store, haves, 0, clientShallow);
-    const haveSet = new Set(haveClosure.objects.keys());
+    const shallowSet = new Set(clientShallow);
+    const normalHaves: string[] = [];
+    const shallowHaves: string[] = [];
+    for (const h of haves) {
+      if (shallowSet.has(h)) {
+        shallowHaves.push(h);
+      } else {
+        normalHaves.push(h);
+      }
+    }
+
+    // Split have closure collection: non-shallow haves use full ancestor closure (depth 0),
+    // while shallow haves only subtract their own commit and tree/blob closure (depth 1)
+    // so that deepen requests don't incorrectly prune parent commits at the shallow boundary.
+    const normalHaveClosure = collectGitClosure(store, normalHaves, 0, clientShallow);
+    const shallowHaveClosure = collectGitClosure(store, shallowHaves, 1, clientShallow);
+    const haveSet = new Set([
+      ...normalHaveClosure.objects.keys(),
+      ...shallowHaveClosure.objects.keys(),
+    ]);
 
     const { objects: sendMap, shallowBoundary } = collectGitClosure(store, wants, deepenN, clientShallow);
     for (const oid of haveSet) {
